@@ -1,1 +1,2 @@
 scapy>=2.4.0
+# tkinter is part of Python standard library (python3-tk on Debian/Ubuntu)

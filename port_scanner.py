@@ -64,6 +64,43 @@ class ScanResult:
         }
 
 
+def print_scan_results(results: ScanResult):
+    """Print formatted scan results"""
+    print("\n" + "=" * 70)
+    print(f"SCAN REPORT FOR {results.target} ({results.target_ip})")
+    print("=" * 70)
+    print(f"Scan Type: {results.scan_type.upper()}")
+    print(f"Timestamp: {results.timestamp}")
+    print(f"Duration:  {results.duration:.2f}s")
+    print("-" * 70)
+    print(f"{'PORT':<12} {'STATE':<15} {'SERVICE':<15} {'VERSION':<20}")
+    print("-" * 70)
+
+    for port in sorted(results.ports, key=lambda x: x.port):
+        print(f"{port.protocol.upper()}:{port.port:<5} {port.state:<15} {port.service:<15} {port.version:<20}")
+
+    print("=" * 70)
+
+
+def save_scan_results(results: ScanResult, filename: str, fmt: str = "json"):
+    """Save scan results to file"""
+    if fmt == "json":
+        with open(filename, 'w') as f:
+            json.dump(results.to_dict(), f, indent=2)
+    elif fmt == "txt":
+        with open(filename, 'w') as f:
+            f.write(f"Scan Report for {results.target} ({results.target_ip})\n")
+            f.write(f"Scan Type: {results.scan_type.upper()}\n")
+            f.write(f"Timestamp: {results.timestamp}\n")
+            f.write(f"Duration: {results.duration:.2f}s\n")
+            f.write("-" * 70 + "\n")
+            f.write(f"{'PORT':<12} {'STATE':<15} {'SERVICE':<15} {'VERSION':<20}\n")
+            f.write("-" * 70 + "\n")
+            for port in sorted(results.ports, key=lambda x: x.port):
+                f.write(f"{port.protocol.upper()}:{port.port:<5} {port.state:<15} {port.service:<15} {port.version:<20}\n")
+    print(f"[*] Results saved to {filename}")
+
+
 class ServiceDetector:
     """Service and version detection for open ports"""
     
@@ -542,6 +579,486 @@ Examples:
         if len(results.ports) == 0:
             print("\n[*] No open ports found. Try adjusting timeout or scan type.")
             
+    except KeyboardInterrupt:
+        print("\n[!] Scan interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n[!] Error: {e}")
+        sys.exit(1)
+
+
+class InteractiveShell:
+    """Interactive shell for the port scanner"""
+
+    def __init__(self):
+        self.target = None
+        self.ports = list(range(1, 1001))
+        self.scan_type = "tcp"
+        self.threads = 100
+        self.timeout = 1.0
+        self.timing = "normal"
+        self.output = None
+        self.format = "json"
+        self.results = None
+        self.running = True
+
+        print("\n" + "=" * 60)
+        print("   PORT SCANNER INTERACTIVE SHELL")
+        print("=" * 60)
+        print("Type 'help' for available commands, 'exit' to quit")
+        print("=" * 60 + "\n")
+
+    def cmd_help(self, args=None):
+        """Show available commands"""
+        print("\nAvailable Commands:")
+        print("-" * 50)
+        print("  help                  - Show this help message")
+        print("  set target <host>     - Set target IP or hostname")
+        print("  set ports <ports>     - Set ports (e.g., '22,80,443' or '1-1000')")
+        print("  set type <tcp|syn|udp> - Set scan type")
+        print("  set threads <n>       - Set number of threads")
+        print("  set timeout <secs>    - Set socket timeout")
+        print("  set timing <preset>   - Set timing (paranoid/sneaky/normal/aggressive/insane)")
+        print("  set output <file>     - Set output file")
+        print("  set format <json|txt> - Set output format")
+        print("  show                  - Show current settings")
+        print("  scan                  - Start the port scan")
+        print("  results               - Show scan results")
+        print("  save                  - Save results to file")
+        print("  clear                 - Clear screen")
+        print("  exit/quit             - Exit the shell")
+        print("-" * 50 + "\n")
+
+    def cmd_set(self, args):
+        """Set configuration options"""
+        if not args:
+            print("[!] Usage: set <option> <value>")
+            return
+
+        parts = args.split(None, 1)
+        if len(parts) < 2:
+            print("[!] Usage: set <option> <value>")
+            return
+
+        option, value = parts[0].lower(), parts[1]
+
+        if option == "target":
+            self.target = value
+            print(f"[*] Target set to: {self.target}")
+        elif option == "ports":
+            if value == "-":
+                self.ports = list(range(1, 65536))
+            else:
+                self.ports = parse_ports(value)
+            print(f"[*] Ports set to: {len(self.ports)} ports")
+        elif option == "type":
+            if value in ["tcp", "syn", "udp"]:
+                self.scan_type = value
+                print(f"[*] Scan type set to: {self.scan_type}")
+            else:
+                print("[!] Invalid scan type. Use: tcp, syn, udp")
+        elif option == "threads":
+            try:
+                self.threads = int(value)
+                print(f"[*] Threads set to: {self.threads}")
+            except ValueError:
+                print("[!] Invalid number of threads")
+        elif option == "timeout":
+            try:
+                self.timeout = float(value)
+                print(f"[*] Timeout set to: {self.timeout}s")
+            except ValueError:
+                print("[!] Invalid timeout value")
+        elif option == "timing":
+            if value in ["paranoid", "sneaky", "normal", "aggressive", "insane"]:
+                self.timing = value
+                print(f"[*] Timing set to: {self.timing}")
+            else:
+                print("[!] Invalid timing. Use: paranoid, sneaky, normal, aggressive, insane")
+        elif option == "output":
+            self.output = value
+            print(f"[*] Output file set to: {self.output}")
+        elif option == "format":
+            if value in ["json", "txt"]:
+                self.format = value
+                print(f"[*] Output format set to: {self.format}")
+            else:
+                print("[!] Invalid format. Use: json, txt")
+        else:
+            print(f"[!] Unknown option: {option}")
+
+    def cmd_show(self, args=None):
+        """Show current settings"""
+        print("\nCurrent Settings:")
+        print("-" * 40)
+        print(f"  Target:    {self.target or '(not set)'}")
+        print(f"  Ports:     {len(self.ports)} ports")
+        print(f"  Scan Type: {self.scan_type}")
+        print(f"  Threads:   {self.threads}")
+        print(f"  Timeout:   {self.timeout}s")
+        print(f"  Timing:    {self.timing}")
+        print(f"  Output:    {self.output or '(not set)'}")
+        print(f"  Format:    {self.format}")
+        print("-" * 40 + "\n")
+
+    def cmd_scan(self, args=None):
+        """Execute port scan"""
+        if not self.target:
+            print("[!] No target set. Use 'set target <host>' first.")
+            return
+
+        if self.scan_type == "syn" and os.geteuid() != 0:
+            print("[!] SYN scan requires root privileges. Run with sudo.")
+            return
+
+        scanner = PortScanner(
+            target=self.target,
+            ports=self.ports,
+            scan_type=self.scan_type,
+            threads=self.threads,
+            timeout=self.timeout,
+            timing=self.timing
+        )
+
+        try:
+            self.results = scanner.scan()
+            print_scan_results(self.results)
+
+            if self.output:
+                save_scan_results(self.results, self.output, self.format)
+
+        except KeyboardInterrupt:
+            print("\n[!] Scan interrupted by user")
+        except Exception as e:
+            print(f"\n[!] Error: {e}")
+
+    def cmd_results(self, args=None):
+        """Show scan results"""
+        if not self.results:
+            print("[!] No scan results available. Run 'scan' first.")
+            return
+        print_scan_results(self.results)
+
+    def cmd_save(self, args=None):
+        """Save results to file"""
+        if not self.results:
+            print("[!] No scan results available. Run 'scan' first.")
+            return
+
+        output = self.output
+        if args:
+            output = args
+
+        if not output:
+            print("[!] No output file set. Use 'set output <file>' or 'save <filename>'")
+            return
+
+        save_scan_results(self.results, output, self.format)
+
+    def cmd_clear(self, args=None):
+        """Clear the screen"""
+        os.system('clear' if os.name == 'posix' else 'cls')
+
+    def cmd_exit(self, args=None):
+        """Exit the shell"""
+        print("[*] Goodbye!")
+        self.running = False
+
+    def run(self):
+        """Run the interactive shell"""
+        while self.running:
+            try:
+                prompt = f"pscanner> " if not self.target else f"pscanner ({self.target})> "
+                cmdline = input(prompt).strip()
+
+                if not cmdline:
+                    continue
+
+                parts = cmdline.split(None, 1)
+                cmd = parts[0].lower()
+                args = parts[1] if len(parts) > 1 else None
+
+                if cmd in ["exit", "quit"]:
+                    self.cmd_exit()
+                elif cmd == "help":
+                    self.cmd_help()
+                elif cmd == "set":
+                    self.cmd_set(args)
+                elif cmd == "show":
+                    self.cmd_show()
+                elif cmd == "scan":
+                    self.cmd_scan()
+                elif cmd == "results":
+                    self.cmd_results()
+                elif cmd == "save":
+                    self.cmd_save(args)
+                elif cmd == "clear":
+                    self.cmd_clear()
+                else:
+                    print(f"[!] Unknown command: {cmd}. Type 'help' for available commands.")
+
+            except KeyboardInterrupt:
+                print("\n[*] Use 'exit' or 'quit' to leave the shell")
+            except EOFError:
+                print("\n[*] Goodbye!")
+                break
+
+
+class SimpleGUI:
+    """Simple GUI for the port scanner using tkinter"""
+
+    def __init__(self):
+        try:
+            import tkinter as tk
+            from tkinter import ttk, scrolledtext, messagebox
+            self.tk = tk
+            self.ttk = ttk
+            self.scrolledtext = scrolledtext
+            self.messagebox = messagebox
+            self.available = True
+        except ImportError:
+            self.available = False
+            return
+
+        self.root = tk.Tk()
+        self.root.title("Port Scanner - Cybersecurity Tool")
+        self.root.geometry("900x700")
+
+        self.target_var = tk.StringVar()
+        self.ports_var = tk.StringVar(value="1-1000")
+        self.scan_type_var = tk.StringVar(value="tcp")
+        self.threads_var = tk.StringVar(value="100")
+        self.timing_var = tk.StringVar(value="normal")
+        self.output_var = tk.StringVar()
+
+        self.results = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Setup the GUI components"""
+        main_frame = self.ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(self.tk.N, self.tk.W, self.tk.E, self.tk.S))
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+
+        row = 0
+        self.ttk.Label(main_frame, text="Target (IP/Hostname):").grid(row=row, column=0, sticky=self.tk.W, pady=5)
+        self.ttk.Entry(main_frame, textvariable=self.target_var, width=40).grid(row=row, column=1, sticky=(self.tk.W, self.tk.E), pady=5)
+        self.ttk.Button(main_frame, text="Scan", command=self.start_scan).grid(row=row, column=2, padx=5, pady=5)
+
+        row += 1
+        self.ttk.Label(main_frame, text="Ports:").grid(row=row, column=0, sticky=self.tk.W, pady=5)
+        self.ttk.Entry(main_frame, textvariable=self.ports_var, width=40).grid(row=row, column=1, sticky=(self.tk.W, self.tk.E), pady=5)
+        self.ttk.Label(main_frame, text="(e.g., '22,80,443' or '1-1000')").grid(row=row, column=2, padx=5, pady=5, sticky=self.tk.W)
+
+        row += 1
+        self.ttk.Label(main_frame, text="Scan Type:").grid(row=row, column=0, sticky=self.tk.W, pady=5)
+        types = [("TCP Connect", "tcp"), ("SYN Stealth (root)", "syn"), ("UDP", "udp")]
+        for i, (text, val) in enumerate(types):
+            self.ttk.Radiobutton(main_frame, text=text, variable=self.scan_type_var, value=val).grid(
+                row=row, column=1+i, sticky=self.tk.W, pady=5)
+
+        row += 1
+        self.ttk.Label(main_frame, text="Threads:").grid(row=row, column=0, sticky=self.tk.W, pady=5)
+        self.ttk.Scale(main_frame, from_=1, to=500, variable=self.threads_var, orient=self.tk.HORIZONTAL).grid(
+            row=row, column=1, sticky=(self.tk.W, self.tk.E), pady=5)
+        self.tk.Label(main_frame, textvariable=self.threads_var).grid(row=row, column=2, pady=5)
+
+        row += 1
+        self.ttk.Label(main_frame, text="Timing:").grid(row=row, column=0, sticky=self.tk.W, pady=5)
+        timings = ["paranoid", "sneaky", "normal", "aggressive", "insane"]
+        self.ttk.Combobox(main_frame, textvariable=self.timing_var, values=timings, state="readonly").grid(
+            row=row, column=1, sticky=(self.tk.W, self.tk.E), pady=5)
+
+        row += 1
+        self.ttk.Label(main_frame, text="Output File:").grid(row=row, column=0, sticky=self.tk.W, pady=5)
+        self.ttk.Entry(main_frame, textvariable=self.output_var, width=40).grid(row=row, column=1, sticky=(self.tk.W, self.tk.E), pady=5)
+        self.ttk.Button(main_frame, text="Save Results", command=self.save_results).grid(row=row, column=2, padx=5, pady=5)
+
+        row += 1
+        self.output_text = self.scrolledtext.ScrolledText(main_frame, width=100, height=30)
+        self.output_text.grid(row=row, column=0, columnspan=3, pady=10, sticky=(self.tk.W, self.tk.E, self.tk.N, self.tk.S))
+
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(row, weight=1)
+
+    def start_scan(self):
+        """Start the port scan in a separate thread"""
+        target = self.target_var.get().strip()
+        if not target:
+            self.messagebox.showerror("Error", "Please enter a target IP or hostname")
+            return
+
+        ports_str = self.ports_var.get().strip()
+        if ports_str == "-":
+            ports = list(range(1, 65536))
+        else:
+            ports = parse_ports(ports_str)
+
+        scan_type = self.scan_type_var.get()
+        threads = int(self.threads_var.get())
+        timing = self.timing_var.get()
+
+        if scan_type == "syn" and os.geteuid() != 0:
+            self.messagebox.showerror("Error", "SYN scan requires root privileges")
+            return
+
+        self.output_text.delete(1.0, self.tk.END)
+        self.output_text.insert(self.tk.END, f"[*] Starting {scan_type.upper()} scan of {target}\n")
+        self.output_text.update()
+
+        import threading
+        thread = threading.Thread(target=self._run_scan, args=(target, ports, scan_type, threads, timing))
+        thread.daemon = True
+        thread.start()
+
+    def _run_scan(self, target, ports, scan_type, threads, timing):
+        """Run the scan in background"""
+        try:
+            scanner = PortScanner(
+                target=target,
+                ports=ports,
+                scan_type=scan_type,
+                threads=threads,
+                timing=timing
+            )
+
+            self.output_text.insert(self.tk.END, f"[*] Scanning {len(ports)} ports with {threads} threads\n")
+            self.output_text.update()
+
+            results = scanner.scan()
+            self.results = results
+
+            self.output_text.insert(self.tk.END, "\n" + "=" * 70 + "\n")
+            self.output_text.insert(self.tk.END, f"SCAN REPORT FOR {results.target} ({results.target_ip})\n")
+            self.output_text.insert(self.tk.END, "=" * 70 + "\n")
+            self.output_text.insert(self.tk.END, f"Scan Type: {results.scan_type.upper()}\n")
+            self.output_text.insert(self.tk.END, f"Duration:  {results.duration:.2f}s\n")
+            self.output_text.insert(self.tk.END, "-" * 70 + "\n")
+            self.output_text.insert(self.tk.END, f"{'PORT':<12} {'STATE':<15} {'SERVICE':<15} {'VERSION':<20}\n")
+            self.output_text.insert(self.tk.END, "-" * 70 + "\n")
+
+            for port in sorted(results.ports, key=lambda x: x.port):
+                self.output_text.insert(self.tk.END,
+                    f"{port.protocol.upper()}:{port.port:<5} {port.state:<15} {port.service:<15} {port.version:<20}\n")
+
+            self.output_text.insert(self.tk.END, "=" * 70 + "\n")
+            self.output_text.insert(self.tk.END, f"\n[*] Found {len(results.ports)} open port(s)\n")
+
+        except Exception as e:
+            self.output_text.insert(self.tk.END, f"\n[!] Error: {e}\n")
+
+    def save_results(self):
+        """Save scan results to file"""
+        if not self.results:
+            self.messagebox.showwarning("Warning", "No scan results to save. Run a scan first.")
+            return
+
+        output = self.output_var.get().strip()
+        if not output:
+            self.messagebox.showwarning("Warning", "Please enter an output filename")
+            return
+
+        save_scan_results(self.results, output, "json")
+        self.messagebox.showinfo("Success", f"Results saved to {output}")
+
+    def run(self):
+        """Run the GUI main loop"""
+        if self.available:
+            self.root.mainloop()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Advanced Port Scanner - Cybersecurity Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s 192.168.1.1
+  %(prog)s scanme.nmap.org -p 1-1000 -t 200
+  %(prog)s 10.0.0.1 -p 22,80,443 --scan-type syn --timing aggressive
+  %(prog)s target.com -p- --output results.json --format json
+
+Interactive Mode:
+  %(prog)s --interactive
+  %(prog)s -i
+
+GUI Mode:
+  %(prog)s --gui
+        """
+    )
+
+    parser.add_argument("target", nargs="?", help="Target IP address or hostname")
+    parser.add_argument("-p", "--ports", default="1-1000",
+                        help="Port specification (e.g., '22,80,443' or '1-1000' or '-' for all)")
+    parser.add_argument("-t", "--threads", type=int, default=100,
+                        help="Number of threads (default: 100)")
+    parser.add_argument("--timeout", type=float, default=1.0,
+                        help="Socket timeout in seconds (default: 1.0)")
+    parser.add_argument("--scan-type", choices=["tcp", "syn", "udp"], default="tcp",
+                        help="Scan type: tcp (connect), syn (stealth), udp (default: tcp)")
+    parser.add_argument("--timing", choices=["paranoid", "sneaky", "normal", "aggressive", "insane"],
+                        default="normal", help="Timing template (default: normal)")
+    parser.add_argument("-o", "--output", help="Output file path")
+    parser.add_argument("-f", "--format", choices=["json", "txt"], default="json",
+                        help="Output format (default: json)")
+    parser.add_argument("--top-ports", type=int, help="Scan top N most common ports")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Run in interactive shell mode")
+    parser.add_argument("--gui", action="store_true", help="Run with GUI")
+
+    args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    if args.interactive:
+        shell = InteractiveShell()
+        shell.run()
+        return
+
+    if args.gui:
+        gui = SimpleGUI()
+        if gui.available:
+            gui.run()
+        else:
+            print("[!] GUI requires tkinter. Install with: apt-get install python3-tk")
+        return
+
+    if not args.target:
+        parser.print_help()
+        sys.exit(1)
+
+    if args.scan_type == "syn" and os.geteuid() != 0:
+        print("[!] SYN scan requires root privileges. Run with sudo.")
+        sys.exit(1)
+
+    if args.top_ports:
+        ports = get_top_ports(args.top_ports)
+    elif args.ports == "-":
+        ports = list(range(1, 65536))
+    else:
+        ports = parse_ports(args.ports)
+
+    scanner = PortScanner(
+        target=args.target,
+        ports=ports,
+        scan_type=args.scan_type,
+        threads=args.threads,
+        timeout=args.timeout,
+        timing=args.timing
+    )
+
+    try:
+        results = scanner.scan()
+        print_scan_results(results)
+
+        if args.output:
+            save_scan_results(results, args.output, args.format)
+
+        if len(results.ports) == 0:
+            print("\n[*] No open ports found. Try adjusting timeout or scan type.")
+
     except KeyboardInterrupt:
         print("\n[!] Scan interrupted by user")
         sys.exit(0)
