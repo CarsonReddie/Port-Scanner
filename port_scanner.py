@@ -399,29 +399,93 @@ class OSDetector:
             "tcp_options": None
         }
     
-    def detect_os(self, ip: str) -> Dict[str, any]:
+    def detect_os(self, ip: str, open_port: int = None) -> Dict[str, any]:
         """Detect OS using passive fingerprinting techniques"""
-        if not SCAPY_AVAILABLE:
-            return self._detect_os_passive(ip)
-        return self._detect_os_active(ip)
+        if SCAPY_AVAILABLE:
+            return self._detect_os_active(ip, open_port)
+        # Without scapy, try to detect OS from service banners
+        return self._detect_os_passive(ip, open_port)
     
-    def _detect_os_passive(self, ip: str) -> Dict[str, any]:
-        """Passive OS detection using available methods"""
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2.0)
-            sock.connect((ip, 80))
-            sock.close()
-        except:
-            pass
+    def _detect_os_passive(self, ip: str, open_port: int = None) -> Dict[str, any]:
+        """Passive OS detection using service banners"""
+        # Try to grab banners from common ports
+        test_ports = [open_port] if open_port else [22, 80, 443, 3389]
+        os_hints = []
+
+        for port in test_ports:
+            if port is None:
+                continue
+            try:
+                if port == 22:  # SSH
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(2.0)
+                    sock.connect((ip, port))
+                    banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
+                    sock.close()
+
+                    # Analyze SSH banner for OS hints
+                    if 'ubuntu' in banner.lower():
+                        os_hints.append('Linux (Ubuntu)')
+                        self.os_info['name'] = 'Linux (Ubuntu)'
+                        self.os_info['accuracy'] = 80
+                    elif 'debian' in banner.lower():
+                        os_hints.append('Linux (Debian)')
+                        self.os_info['name'] = 'Linux (Debian)'
+                        self.os_info['accuracy'] = 80
+                    elif 'centos' in banner.lower():
+                        os_hints.append('Linux (CentOS)')
+                        self.os_info['name'] = 'Linux (CentOS)'
+                        self.os_info['accuracy'] = 80
+                    elif 'windows' in banner.lower():
+                        os_hints.append('Windows')
+                        self.os_info['name'] = 'Windows'
+                        self.os_info['accuracy'] = 80
+
+                elif port in [80, 443]:  # HTTP/HTTPS
+                    import ssl
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(2.0)
+                    if port == 443:
+                        sock = ssl.wrap_socket(sock)
+                    sock.connect((ip, port))
+                    sock.send(f"HEAD / HTTP/1.0\r\nHost: {ip}\r\n\r\n".encode())
+                    response = sock.recv(1024).decode('utf-8', errors='ignore')
+                    sock.close()
+
+                    # Check Server header
+                    for line in response.split('\n'):
+                        if 'server:' in line.lower():
+                            server = line.split(':', 1)[1].strip()
+                            if 'ubuntu' in server.lower() or 'debian' in server.lower():
+                                os_hints.append('Linux')
+                                self.os_info['name'] = 'Linux'
+                                self.os_info['accuracy'] = 60
+                            elif 'windows' in server.lower():
+                                os_hints.append('Windows')
+                                self.os_info['name'] = 'Windows'
+                                self.os_info['accuracy'] = 60
+
+            except:
+                continue
+
         return self.os_info
     
-    def _detect_os_active(self, ip: str) -> Dict[str, any]:
+    def _detect_os_active(self, ip: str, open_port: int = None) -> Dict[str, any]:
         """Active OS detection using SYN probe and response analysis"""
         try:
-            # Send SYN packet and analyze response
-            packet = IP(dst=ip)/TCP(dport=80, flags="S")
-            response = sr1(packet, timeout=2, verbose=0)
+            # Use open port if available, otherwise try common ports
+            test_ports = [open_port] if open_port else [22, 80, 443, 3389, 22]
+            response = None
+            used_port = None
+            
+            for port in test_ports:
+                if port is None:
+                    continue
+                packet = IP(dst=ip)/TCP(dport=port, flags="S")
+                response = sr1(packet, timeout=2, verbose=0)
+                if response:
+                    used_port = port
+                    break
             
             if response and response.haslayer(IP) and response.haslayer(TCP):
                 ip_layer = response.getlayer(IP)
@@ -450,8 +514,9 @@ class OSDetector:
                         self.os_info["name"] = most_common[0][0]
                         self.os_info["accuracy"] = min(90, 40 + most_common[0][1] * 20)
                 
-                # Send RST to close
-                sr1(IP(dst=ip)/TCP(dport=80, flags="R"), timeout=0.5, verbose=0)
+                # Send RST to close using the port we got response from
+                if used_port:
+                    sr1(IP(dst=ip)/TCP(dport=used_port, flags="R"), timeout=0.5, verbose=0)
         
         except Exception as e:
             logger.debug(f"OS detection error for {ip}: {e}")
@@ -801,7 +866,11 @@ class PortScanner:
         
         if self.os_detection:
             print("[*] Performing OS detection...")
-            self.results.os_info = self.os_detector.detect_os(self.target_ip)
+            # Get an open port to use for OS detection
+            open_port = None
+            if self.results.ports:
+                open_port = self.results.ports[0].port
+            self.results.os_info = self.os_detector.detect_os(self.target_ip, open_port)
             print(f"[*] OS Detection: {self.results.os_info.get('name', 'unknown')} (Accuracy: {self.results.os_info.get('accuracy', 0)}%)")
         
         return self.results
