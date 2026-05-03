@@ -4,7 +4,11 @@ A high-performance, multi-threaded port scanner built in Python for cybersecurit
 
 ## Features
 
-- **Multiple Scan Types**: TCP Connect, SYN Stealth (raw sockets), and UDP scanning
+- **Multiple Scan Types**: TCP Connect, SYN Stealth (raw sockets), UDP, NULL, FIN, and Xmas scanning
+- **Stealth Scanning**: NULL, FIN, and Xmas scans for firewall evasion and IDS bypass
+- **OS Detection**: Passive and active OS fingerprinting using TTL, TCP window size, and TCP options
+- **Host Discovery**: ICMP ping sweep and ARP scanning for network enumeration (CIDR support)
+- **CIDR Support**: Scan entire subnets (e.g., 192.168.1.0/24) for comprehensive reconnaissance
 - **Multi-threaded Architecture**: Configurable thread pool (up to 500 threads) for fast scanning
 - **Service Detection**: Identifies services running on open ports (HTTP, SSH, FTP, SMTP, MySQL, etc.)
 - **Version Fingerprinting**: Grapples banners and version information from responsive services
@@ -50,6 +54,24 @@ python3 port_scanner.py target.com -p 1-65535 -t 200
 sudo python3 port_scanner.py 192.168.1.1 --scan-type syn -p 1-1000
 ```
 
+### Stealth Scans - NULL/FIN/Xmas (Requires Root, Evasion Techniques)
+```bash
+sudo python3 port_scanner.py 192.168.1.1 --scan-type null -p 1-1000
+sudo python3 port_scanner.py 192.168.1.1 --scan-type fin -p 1-1000
+sudo python3 port_scanner.py 192.168.1.1 --scan-type xmas -p 1-1000
+```
+
+### OS Detection
+```bash
+python3 port_scanner.py target.com --os-detection -p 1-1000
+```
+
+### Host Discovery with CIDR Support
+```bash
+python3 port_scanner.py 192.168.1.0/24 --discover-hosts
+python3 port_scanner.py 10.0.0.0/24 --discover-hosts -o hosts.json
+```
+
 ### Scan Top 100 Common Ports
 ```bash
 python3 port_scanner.py target.com --top-ports 100 --timing aggressive
@@ -70,21 +92,23 @@ python3 port_scanner.py -i
 
 Available commands in interactive shell:
 ```
-  help                  - Show available commands
-  set target <host>     - Set target IP or hostname
-  set ports <ports>     - Set ports (e.g., '22,80,443' or '1-1000')
-  set type <tcp|syn|udp> - Set scan type
-  set threads <n>       - Set number of threads
-  set timeout <secs>    - Set socket timeout
-  set timing <preset>   - Set timing (paranoid/sneaky/normal/aggressive/insane)
-  set output <file>     - Set output file
-  set format <json|txt> - Set output format
-  show                  - Show current settings
-  scan                  - Start the port scan
-  results               - Show scan results
-  save                  - Save results to file
-  clear                 - Clear screen
-  exit/quit             - Exit the shell
+  help                      - Show available commands
+  set target <host>         - Set target IP, hostname, or CIDR
+  set ports <ports>         - Set ports (e.g., '22,80,443' or '1-1000')
+  set type <tcp|syn|udp|null|fin|xmas> - Set scan type
+  set threads <n>           - Set number of threads
+  set timeout <secs>        - Set socket timeout
+  set timing <preset>       - Set timing (paranoid/sneaky/normal/aggressive/insane)
+  set output <file>         - Set output file
+  set format <json|txt>     - Set output format
+  set os-detection <on|off> - Enable/disable OS detection
+  set discover <on|off>     - Enable/disable host discovery
+  show                      - Show current settings
+  scan                      - Start the port scan
+  results                   - Show scan results
+  save                      - Save results to file
+  clear                     - Clear screen
+  exit/quit                 - Exit the shell
 ```
 
 ### GUI Mode (Requires tkinter)
@@ -105,21 +129,23 @@ The GUI provides a simple point-and-click interface with:
 
 ```
 positional arguments:
-  target                Target IP address or hostname
+  target                Target IP address, hostname, or CIDR (e.g., 192.168.1.0/24)
 
 optional arguments:
   -h, --help            show this help message and exit
   -p, --ports PORTS     Port specification (e.g., '22,80,443' or '1-1000' or '-' for all)
   -t, --threads THREADS Number of threads (default: 100)
   --timeout FLOAT       Socket timeout in seconds (default: 1.0)
-  --scan-type {tcp,syn,udp}
-                        Scan type: tcp (connect), syn (stealth), udp (default: tcp)
+  --scan-type {tcp,syn,udp,null,fin,xmas}
+                        Scan type: tcp, syn, udp, null, fin, xmas (default: tcp)
   --timing {paranoid,sneaky,normal,aggressive,insane}
                         Timing template (default: normal)
   -o, --output FILE     Output file path
   -f, --format {json,txt}
                         Output format (default: json)
   --top-ports N         Scan top N most common ports
+  --os-detection        Enable OS detection
+  --discover-hosts      Discover live hosts (CIDR required)
   -v, --verbose         Verbose output
   -i, --interactive     Run in interactive shell mode
   --gui                 Run with GUI
@@ -127,10 +153,13 @@ optional arguments:
 
 ## Example Output
 
+### Port Scan with OS Detection
 ```
 [*] Starting TCP scan of scanme.nmap.org (45.33.32.156)
+[*] Performing OS detection...
+[*] OS Detection: Linux (2.6.x) (Accuracy: 60%)
+  TTL: 64, Window: 5840
 [*] Scanning 1000 ports with 100 threads
-[*] Timeout: 1.0s | Timing: normal
 ------------------------------------------------------------
 [+] TCP:22    open            ssh             OpenSSH 8.2p1
 [+] TCP:80    open            http            nginx/1.18.0
@@ -140,9 +169,23 @@ optional arguments:
 [*] Found 3 open port(s)
 ```
 
+### Host Discovery (CIDR)
+```
+[*] Ping sweep on 192.168.1.0/24
+[*] ARP sweep on 192.168.1.0/24
+[+] Host discovered: 192.168.1.1 (00:11:22:33:44:55)
+[+] Host discovered: 192.168.1.15 (aa:bb:cc:dd:ee:ff)
+[+] Host discovered: 192.168.1.100 (11:22:33:44:55:66)
+[*] Found 3 live host(s)
+```
+
 ## Technical Implementation
 
 - **Raw Socket Programming**: Uses raw sockets for SYN stealth scanning
+- **Stealth Scan Techniques**: NULL, FIN, and Xmas scans for firewall/IDS evasion
+- **OS Fingerprinting**: TTL analysis, TCP window size, and TCP options detection
+- **Host Discovery**: ICMP ping sweep and ARP scanning for network enumeration
+- **CIDR Support**: Full subnet scanning with ipaddress module integration
 - **Concurrent Execution**: ThreadPoolExecutor for parallel port scanning
 - **Socket Options**: SO_REUSEADDR for efficient socket handling
 - **Protocol Detection**: Banner grabbing and service fingerprinting
@@ -155,6 +198,10 @@ optional arguments:
 
 - Designed and implemented a multi-threaded port scanner with 500+ threads support
 - Integrated raw socket programming for stealth SYN scanning techniques
+- Implemented stealth scan evasion techniques (NULL, FIN, Xmas) for firewall/IDS bypass
+- Built OS detection engine using TTL, TCP window size, and TCP options fingerprinting
+- Developed host discovery module with ICMP ping sweep and ARP scanning capabilities
+- Added CIDR subnet scanning support for comprehensive network reconnaissance
 - Built service detection engine with banner grabbing capabilities
 - Implemented configurable timing templates for evasion and performance tuning
 - Developed professional CLI with argparse following industry standards

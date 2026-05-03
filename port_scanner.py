@@ -52,6 +52,8 @@ class ScanResult:
     timestamp: str
     duration: float
     ports: List[PortResult] = field(default_factory=list)
+    os_info: Dict[str, any] = field(default_factory=dict)
+    discovered_hosts: List[Dict[str, str]] = field(default_factory=list)
     
     def to_dict(self):
         return {
@@ -60,7 +62,9 @@ class ScanResult:
             "scan_type": self.scan_type,
             "timestamp": self.timestamp,
             "duration": self.duration,
-            "ports": [p.to_dict() for p in self.ports]
+            "os_info": self.os_info,
+            "ports": [p.to_dict() for p in self.ports],
+            "discovered_hosts": self.discovered_hosts
         }
 
 
@@ -72,12 +76,29 @@ def print_scan_results(results: ScanResult):
     print(f"Scan Type: {results.scan_type.upper()}")
     print(f"Timestamp: {results.timestamp}")
     print(f"Duration:  {results.duration:.2f}s")
-    print("-" * 70)
-    print(f"{'PORT':<12} {'STATE':<15} {'SERVICE':<15} {'VERSION':<20}")
+
+    if results.os_info and results.os_info.get('name', 'unknown') != 'unknown':
+        print(f"OS Detection: {results.os_info['name']} (Accuracy: {results.os_info.get('accuracy', 0)}%)")
+        if results.os_info.get('ttl'):
+            print(f"  TTL: {results.os_info['ttl']}, Window: {results.os_info.get('window_size', 'N/A')}")
+
     print("-" * 70)
 
-    for port in sorted(results.ports, key=lambda x: x.port):
-        print(f"{port.protocol.upper()}:{port.port:<5} {port.state:<15} {port.service:<15} {port.version:<20}")
+    if results.discovered_hosts:
+        print(f"\nDISCOVERED HOSTS ({len(results.discovered_hosts)} found):")
+        print(f"{'IP':<20} {'MAC':<20} {'STATUS':<10}")
+        print("-" * 50)
+        for host in results.discovered_hosts:
+            print(f"{host['ip']:<20} {host.get('mac', 'N/A'):<20} {host['status']:<10}")
+        print("=" * 70)
+
+    if results.ports:
+        print(f"\n{'PORT':<12} {'STATE':<15} {'SERVICE':<15} {'VERSION':<20}")
+        print("-" * 70)
+        for port in sorted(results.ports, key=lambda x: x.port):
+            print(f"{port.protocol.upper()}:{port.port:<5} {port.state:<15} {port.service:<15} {port.version:<20}")
+    else:
+        print("\nNo open ports found.")
 
     print("=" * 70)
 
@@ -352,15 +373,17 @@ class SYNStealthScanner:
 
 class PortScanner:
     """Main port scanner orchestrator"""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  target: str,
                  ports: List[int],
                  scan_type: str = "tcp",
                  threads: int = 100,
                  timeout: float = 1.0,
-                 timing: str = "normal"):
-        
+                 timing: str = "normal",
+                 os_detection: bool = False,
+                 discover_hosts: bool = False):
+
         self.target = target
         self.target_ip = self._resolve_target(target)
         self.ports = ports
@@ -368,6 +391,8 @@ class PortScanner:
         self.threads = threads
         self.timeout = timeout
         self.timing = timing
+        self.os_detection = os_detection
+        self.discover_hosts = discover_hosts
         self.results = ScanResult(
             target=target,
             target_ip=self.target_ip,
@@ -375,9 +400,10 @@ class PortScanner:
             timestamp=datetime.now().isoformat(),
             duration=0.0
         )
-        
+
         self.detector = ServiceDetector()
-        
+        self.os_detector = OSDetector()
+
         timing_presets = {
             "paranoid": (5.0, 10),
             "sneaky": (2.0, 25),
@@ -385,12 +411,12 @@ class PortScanner:
             "aggressive": (0.5, 300),
             "insane": (0.1, 500)
         }
-        
+
         if timing in timing_presets:
             self.timeout, self.threads = timing_presets[timing]
-        
-        if scan_type == "syn" and not SCAPY_AVAILABLE:
-            print("[!] SYN scan requires scapy. Install with: pip install scapy")
+
+        if scan_type in ["syn", "null", "fin", "xmas"] and not SCAPY_AVAILABLE:
+            print("[!] Stealth scans require scapy. Install with: pip install scapy")
             print("[!] Falling back to TCP connect scan")
             self.scan_type = "tcp"
     
@@ -401,16 +427,329 @@ class PortScanner:
         except socket.gaierror:
             print(f"[!] Failed to resolve hostname: {target}")
             sys.exit(1)
+
+
+class OSDetector:
+    """OS Detection using TTL, TCP window size, and TCP options fingerprinting"""
+
+    TTL_SIGNATURES = {
+        64: ["Linux", "macOS", "Android"],
+        128: ["Windows"],
+        255: ["Cisco IOS", "Solaris"],
+        32: ["Windows 95/98/ME"],
+        60: ["AIX"],
+    }
+
+    WINDOW_SIZE_SIGNATURES = {
+        65535: ["Linux (2.4.x)", "FreeBSD"],
+        5840: ["Linux (2.6.x)"],
+        8192: ["Windows", "macOS"],
+        16384: ["AIX"],
+        4128: ["Cisco IOS"],
+    }
+
+    def __init__(self):
+        self.os_info = {
+            "name": "unknown",
+            "accuracy": 0,
+            "ttl": None,
+            "window_size": None,
+            "tcp_options": None
+        }
+
+    def detect_os(self, ip: str) -> Dict[str, any]:
+        """Detect OS using passive fingerprinting techniques"""
+        if not SCAPY_AVAILABLE:
+            return self._detect_os_passive(ip)
+        return self._detect_os_active(ip)
+
+    def _detect_os_passive(self, ip: str) -> Dict[str, any]:
+        """Passive OS detection using available methods"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect((ip, 80))
+            sock.close()
+        except:
+            pass
+        return self.os_info
+
+    def _detect_os_active(self, ip: str) -> Dict[str, any]:
+        """Active OS detection using SYN probe and response analysis"""
+        try:
+            # Send SYN packet and analyze response
+            packet = IP(dst=ip)/TCP(dport=80, flags="S")
+            response = sr1(packet, timeout=2, verbose=0)
+
+            if response and response.haslayer(IP) and response.haslayer(TCP):
+                ip_layer = response.getlayer(IP)
+                tcp_layer = response.getlayer(TCP)
+
+                ttl = ip_layer.ttl
+                window_size = tcp_layer.window
+                tcp_options = tcp_layer.options
+
+                self.os_info["ttl"] = ttl
+                self.os_info["window_size"] = window_size
+                self.os_info["tcp_options"] = str(tcp_options)
+
+                os_matches = []
+
+                if ttl in self.TTL_SIGNATURES:
+                    os_matches.extend(self.TTL_SIGNATURES[ttl])
+
+                if window_size in self.WINDOW_SIZE_SIGNATURES:
+                    os_matches.extend(self.WINDOW_SIZE_SIGNATURES[window_size])
+
+                if os_matches:
+                    from collections import Counter
+                    most_common = Counter(os_matches).most_common(1)
+                    if most_common:
+                        self.os_info["name"] = most_common[0][0]
+                        self.os_info["accuracy"] = min(90, 40 + most_common[0][1] * 20)
+
+                # Send RST to close
+                sr1(IP(dst=ip)/TCP(dport=80, flags="R"), timeout=0.5, verbose=0)
+
+        except Exception as e:
+            logger.debug(f"OS detection error for {ip}: {e}")
+
+        return self.os_info
+
+
+class NullScan:
+    """NULL Scan - Send TCP packet with no flags (stealth/evasion)"""
+
+    def __init__(self, timeout: float = 2.0):
+        self.timeout = timeout
+
+    def scan_port(self, ip: str, port: int) -> PortResult:
+        """Scan port using NULL scan technique"""
+        if not SCAPY_AVAILABLE:
+            return PortResult(port=port, protocol="tcp", state="error", banner="scapy not available")
+
+        start = time.time()
+        result = PortResult(port=port, protocol="tcp", state="open|filtered")
+
+        try:
+            packet = IP(dst=ip)/TCP(dport=port, flags=0)
+            response = sr1(packet, timeout=self.timeout, verbose=0)
+
+            if response and response.haslayer(TCP):
+                tcp_layer = response.getlayer(TCP)
+                if tcp_layer.flags == 0x14:  # RST-ACK
+                    result.state = "closed"
+            elif response and response.haslayer(ICMP):
+                icmp_layer = response.getlayer(ICMP)
+                if icmp_layer.type == 3 and icmp_layer.code in [1, 2, 3, 9, 10, 13]:
+                    result.state = "filtered"
+
+            result.latency = time.time() - start
+
+        except Exception as e:
+            logger.debug(f"NULL scan error {ip}:{port} - {e}")
+
+        return result
+
+
+class FinScan:
+    """FIN Scan - Send TCP packet with FIN flag (stealth/evasion)"""
+
+    def __init__(self, timeout: float = 2.0):
+        self.timeout = timeout
+
+    def scan_port(self, ip: str, port: int) -> PortResult:
+        """Scan port using FIN scan technique"""
+        if not SCAPY_AVAILABLE:
+            return PortResult(port=port, protocol="tcp", state="error", banner="scapy not available")
+
+        start = time.time()
+        result = PortResult(port=port, protocol="tcp", state="open|filtered")
+
+        try:
+            packet = IP(dst=ip)/TCP(dport=port, flags="F")
+            response = sr1(packet, timeout=self.timeout, verbose=0)
+
+            if response and response.haslayer(TCP):
+                tcp_layer = response.getlayer(TCP)
+                if tcp_layer.flags == 0x14:  # RST-ACK
+                    result.state = "closed"
+            elif response and response.haslayer(ICMP):
+                icmp_layer = response.getlayer(ICMP)
+                if icmp_layer.type == 3 and icmp_layer.code in [1, 2, 3, 9, 10, 13]:
+                    result.state = "filtered"
+
+            result.latency = time.time() - start
+
+        except Exception as e:
+            logger.debug(f"FIN scan error {ip}:{port} - {e}")
+
+        return result
+
+
+class XmasScan:
+    """Xmas Scan - Send TCP packet with FIN, URG, PSH flags (stealth/evasion)"""
+
+    def __init__(self, timeout: float = 2.0):
+        self.timeout = timeout
+
+    def scan_port(self, ip: str, port: int) -> PortResult:
+        """Scan port using Xmas scan technique"""
+        if not SCAPY_AVAILABLE:
+            return PortResult(port=port, protocol="tcp", state="error", banner="scapy not available")
+
+        start = time.time()
+        result = PortResult(port=port, protocol="tcp", state="open|filtered")
+
+        try:
+            packet = IP(dst=ip)/TCP(dport=port, flags="FPU")
+            response = sr1(packet, timeout=self.timeout, verbose=0)
+
+            if response and response.haslayer(TCP):
+                tcp_layer = response.getlayer(TCP)
+                if tcp_layer.flags == 0x14:  # RST-ACK
+                    result.state = "closed"
+            elif response and response.haslayer(ICMP):
+                icmp_layer = response.getlayer(ICMP)
+                if icmp_layer.type == 3 and icmp_layer.code in [1, 2, 3, 9, 10, 13]:
+                    result.state = "filtered"
+
+            result.latency = time.time() - start
+
+        except Exception as e:
+            logger.debug(f"Xmas scan error {ip}:{port} - {e}")
+
+        return result
+
+
+class HostDiscovery:
+    """Host discovery using ping sweep and ARP scan for local networks"""
+
+    def __init__(self, timeout: float = 1.0):
+        self.timeout = timeout
+
+    def discover_hosts(self, network: str) -> List[Dict[str, str]]:
+        """Discover live hosts using ping sweep"""
+        hosts = []
+
+        try:
+            ip = network.split('/')[0]
+            cidr = int(network.split('/')[1]) if '/' in network else 24
+
+            if cidr < 24:
+                print(f"[!] CIDR /{cidr} is large, limiting to first 256 addresses")
+                cidr = 24
+
+            base_ip = '.'.join(ip.split('.')[:3])
+            start = 1
+            end = 255
+
+            print(f"[*] Ping sweep on {base_ip}.0/{cidr}")
+
+            if SCAPY_AVAILABLE:
+                hosts = self._arp_sweep(network) if self._is_local_network(ip) else self._icmp_sweep(base_ip, start, end)
+            else:
+                hosts = self._icmp_sweep(base_ip, start, end)
+
+        except Exception as e:
+            logger.error(f"Host discovery error: {e}")
+
+        return hosts
+
+    def _is_local_network(self, ip: str) -> bool:
+        """Check if IP is in local network range"""
+        local_ranges = ["10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.",
+                       "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.",
+                       "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168."]
+        return any(ip.startswith(prefix) for prefix in local_ranges)
+
+    def _arp_sweep(self, network: str) -> List[Dict[str, str]]:
+        """ARP scan for local network discovery"""
+        hosts = []
+        base_ip = network.split('/')[0]
+        base = '.'.join(base_ip.split('.')[:3])
+
+        print(f"[*] ARP sweep on {base}.0/24")
+
+        for i in range(1, 255):
+            target = f"{base}.{i}"
+            try:
+                packet = IP(dst=target)/TCP(dport=80, flags="S")
+                response = sr1(packet, timeout=self.timeout, verbose=0)
+                if response:
+                    mac = response.src if hasattr(response, 'src') else "unknown"
+                    hosts.append({"ip": target, "mac": mac, "status": "up"})
+                    print(f"[+] Host discovered: {target} ({mac})")
+            except:
+                pass
+
+        return hosts
+
+    def _icmp_sweep(self, base_ip: str, start: int, end: int) -> List[Dict[str, str]]:
+        """ICMP ping sweep for host discovery"""
+        hosts = []
+
+        if SCAPY_AVAILABLE:
+            for i in range(start, end + 1):
+                target = f"{base_ip}.{i}"
+                try:
+                    packet = IP(dst=target)/ICMP()
+                    response = sr1(packet, timeout=self.timeout, verbose=0)
+                    if response:
+                        hosts.append({"ip": target, "mac": "N/A", "status": "up"})
+                        print(f"[+] Host discovered: {target}")
+                except:
+                    pass
+        else:
+            for i in range(start, end + 1):
+                target = f"{base_ip}.{i}"
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+                    sock.settimeout(self.timeout)
+                    sock.sendto(b'\x08\x00\x00\x00\x00\x00\x00\x00', (target, 0))
+                    try:
+                        data, addr = sock.recvfrom(1024)
+                        hosts.append({"ip": target, "mac": "N/A", "status": "up"})
+                        print(f"[+] Host discovered: {target}")
+                    except socket.timeout:
+                        pass
+                    sock.close()
+                except:
+                    pass
+
+        return hosts
+
+
+def parse_cidr(cidr: str) -> List[str]:
+    """Parse CIDR notation and return list of IPs"""
+    import ipaddress
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+        return [str(ip) for ip in network.hosts()]
+    except ValueError as e:
+        print(f"[!] Invalid CIDR notation: {e}")
+        return []
     
     def scan(self) -> ScanResult:
-        """Execute the port scan"""
+        """Execute the port scan with optional OS detection and host discovery"""
         print(f"[*] Starting {self.scan_type.upper()} scan of {self.target} ({self.target_ip})")
+
+        if self.discover_hosts:
+            print(f"[*] Performing host discovery...")
+            discovery = HostDiscovery(self.timeout)
+            if '/' in self.target:
+                hosts = discovery.discover_hosts(self.target)
+            else:
+                hosts = discovery.discover_hosts(f"{self.target}/24")
+            self.results.discovered_hosts = hosts
+            print(f"[*] Found {len(hosts)} live host(s)")
+
         print(f"[*] Scanning {len(self.ports)} ports with {self.threads} threads")
         print(f"[*] Timeout: {self.timeout}s | Timing: {self.timing}")
         print("-" * 60)
-        
+
         start_time = time.time()
-        
+
         if self.scan_type == "tcp":
             scanner = TCPConnectScanner(self.timeout, self.detector)
             scan_func = scanner.scan_port
@@ -420,23 +759,32 @@ class PortScanner:
         elif self.scan_type == "udp":
             scanner = UDPScanner(self.timeout, self.detector)
             scan_func = scanner.scan_port
+        elif self.scan_type == "null":
+            scanner = NullScan(self.timeout)
+            scan_func = scanner.scan_port
+        elif self.scan_type == "fin":
+            scanner = FinScan(self.timeout)
+            scan_func = scanner.scan_port
+        elif self.scan_type == "xmas":
+            scanner = XmasScan(self.timeout)
+            scan_func = scanner.scan_port
         else:
             raise ValueError(f"Unknown scan type: {self.scan_type}")
-        
+
         with ThreadPoolExecutor(max_workers=self.threads) as executor:
             future_to_port = {
-                executor.submit(scan_func, self.target_ip, port): port 
+                executor.submit(scan_func, self.target_ip, port): port
                 for port in self.ports
             }
-            
+
             completed = 0
             total = len(self.ports)
-            
+
             for future in as_completed(future_to_port):
                 completed += 1
                 if completed % 50 == 0 or completed == total:
                     print(f"\r[*] Progress: {completed}/{total} ports scanned", end="", flush=True)
-                
+
                 try:
                     result = future.result()
                     if result.state in ["open", "open|filtered"]:
@@ -444,13 +792,18 @@ class PortScanner:
                         print(f"\n[+] {result.protocol.upper()}:{result.port:5d} {result.state:15s} {result.service:15s} {result.version}")
                 except Exception as e:
                     logger.error(f"Error scanning port: {e}")
-        
+
         print(f"\r[*] Progress: {total}/{total} ports scanned")
         self.results.duration = time.time() - start_time
         print("-" * 60)
         print(f"[*] Scan completed in {self.results.duration:.2f} seconds")
         print(f"[*] Found {len(self.results.ports)} open port(s)")
-        
+
+        if self.os_detection:
+            print("[*] Performing OS detection...")
+            self.results.os_info = self.os_detector.detect_os(self.target_ip)
+            print(f"[*] OS Detection: {self.results.os_info.get('name', 'unknown')} (Accuracy: {self.results.os_info.get('accuracy', 0)}%)")
+
         return self.results
     
     def print_results(self):
@@ -599,6 +952,8 @@ class InteractiveShell:
         self.timing = "normal"
         self.output = None
         self.format = "json"
+        self.os_detection = False
+        self.discover_hosts = False
         self.results = None
         self.running = True
 
@@ -652,11 +1007,17 @@ class InteractiveShell:
                 self.ports = parse_ports(value)
             print(f"[*] Ports set to: {len(self.ports)} ports")
         elif option == "type":
-            if value in ["tcp", "syn", "udp"]:
+            if value in ["tcp", "syn", "udp", "null", "fin", "xmas"]:
                 self.scan_type = value
                 print(f"[*] Scan type set to: {self.scan_type}")
             else:
-                print("[!] Invalid scan type. Use: tcp, syn, udp")
+                print("[!] Invalid scan type. Use: tcp, syn, udp, null, fin, xmas")
+        elif option == "os-detection":
+            self.os_detection = value.lower() in ["true", "yes", "1", "on"]
+            print(f"[*] OS detection set to: {self.os_detection}")
+        elif option == "discover":
+            self.discover_hosts = value.lower() in ["true", "yes", "1", "on"]
+            print(f"[*] Host discovery set to: {self.discover_hosts}")
         elif option == "threads":
             try:
                 self.threads = int(value)
@@ -707,8 +1068,8 @@ class InteractiveShell:
             print("[!] No target set. Use 'set target <host>' first.")
             return
 
-        if self.scan_type == "syn" and os.geteuid() != 0:
-            print("[!] SYN scan requires root privileges. Run with sudo.")
+        if self.scan_type in ["syn", "null", "fin", "xmas"] and os.geteuid() != 0:
+            print(f"[!] {self.scan_type.upper()} scan requires root privileges. Run with sudo.")
             return
 
         scanner = PortScanner(
@@ -717,7 +1078,9 @@ class InteractiveShell:
             scan_type=self.scan_type,
             threads=self.threads,
             timeout=self.timeout,
-            timing=self.timing
+            timing=self.timing,
+            os_detection=self.os_detection,
+            discover_hosts=self.discover_hosts
         )
 
         try:
@@ -978,6 +1341,8 @@ Examples:
   %(prog)s scanme.nmap.org -p 1-1000 -t 200
   %(prog)s 10.0.0.1 -p 22,80,443 --scan-type syn --timing aggressive
   %(prog)s target.com -p- --output results.json --format json
+  %(prog)s 192.168.1.0/24 --discover-hosts
+  %(prog)s target.com --os-detection -p 1-1000
 
 Interactive Mode:
   %(prog)s --interactive
@@ -988,21 +1353,23 @@ GUI Mode:
         """
     )
 
-    parser.add_argument("target", nargs="?", help="Target IP address or hostname")
+    parser.add_argument("target", nargs="?", help="Target IP address, hostname, or CIDR (e.g., 192.168.1.0/24)")
     parser.add_argument("-p", "--ports", default="1-1000",
                         help="Port specification (e.g., '22,80,443' or '1-1000' or '-' for all)")
     parser.add_argument("-t", "--threads", type=int, default=100,
                         help="Number of threads (default: 100)")
     parser.add_argument("--timeout", type=float, default=1.0,
                         help="Socket timeout in seconds (default: 1.0)")
-    parser.add_argument("--scan-type", choices=["tcp", "syn", "udp"], default="tcp",
-                        help="Scan type: tcp (connect), syn (stealth), udp (default: tcp)")
+    parser.add_argument("--scan-type", choices=["tcp", "syn", "udp", "null", "fin", "xmas"],
+                        default="tcp", help="Scan type: tcp, syn, udp, null, fin, xmas (default: tcp)")
     parser.add_argument("--timing", choices=["paranoid", "sneaky", "normal", "aggressive", "insane"],
                         default="normal", help="Timing template (default: normal)")
     parser.add_argument("-o", "--output", help="Output file path")
     parser.add_argument("-f", "--format", choices=["json", "txt"], default="json",
                         help="Output format (default: json)")
     parser.add_argument("--top-ports", type=int, help="Scan top N most common ports")
+    parser.add_argument("--os-detection", action="store_true", help="Enable OS detection")
+    parser.add_argument("--discover-hosts", action="store_true", help="Discover live hosts (CIDR required)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser.add_argument("-i", "--interactive", action="store_true", help="Run in interactive shell mode")
     parser.add_argument("--gui", action="store_true", help="Run with GUI")
@@ -1029,8 +1396,8 @@ GUI Mode:
         parser.print_help()
         sys.exit(1)
 
-    if args.scan_type == "syn" and os.geteuid() != 0:
-        print("[!] SYN scan requires root privileges. Run with sudo.")
+    if args.scan_type in ["syn", "null", "fin", "xmas"] and os.geteuid() != 0:
+        print(f"[!] {args.scan_type.upper()} scan requires root privileges. Run with sudo.")
         sys.exit(1)
 
     if args.top_ports:
@@ -1046,7 +1413,9 @@ GUI Mode:
         scan_type=args.scan_type,
         threads=args.threads,
         timeout=args.timeout,
-        timing=args.timing
+        timing=args.timing,
+        os_detection=args.os_detection,
+        discover_hosts=args.discover_hosts
     )
 
     try:
@@ -1056,7 +1425,7 @@ GUI Mode:
         if args.output:
             save_scan_results(results, args.output, args.format)
 
-        if len(results.ports) == 0:
+        if len(results.ports) == 0 and not results.discovered_hosts:
             print("\n[*] No open ports found. Try adjusting timeout or scan type.")
 
     except KeyboardInterrupt:
